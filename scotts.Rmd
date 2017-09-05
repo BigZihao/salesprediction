@@ -1,0 +1,118 @@
+---
+title: "Scotts"
+author: "Zihao"
+date: "August 29, 2017"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+
+```{r, echo=FALSE, include=FALSE}
+
+setwd("C:/Users/zihao.zhang/Desktop")
+
+
+target_name = "Lawn.Fertilizer.Sales.Units"
+SampleSize = 1
+
+
+#########################################
+#######    Data Processing     #########
+#########################################
+
+source("scotts_dataprocessing.R")
+
+names(scotts)
+
+train = scotts[scotts$Week.Ending.Sunday<="2016-06-25",-c(17:33)]
+test = scotts[scotts$Week.Ending.Sunday>="2016-06-25",-c(17:33)]
+
+dim(train)
+Sample =  round(dim(train)[1]*SampleSize)
+
+summary(scotts$Week.Ending.Sunday)
+
+names(train)
+
+
+library(xgboost)
+train_matrix =  as.matrix(train[1:Sample, -which(names(train) %in% c("target"))])
+test_matrix =  as.matrix(test[, -which(names(test) %in% c("target"))])
+train_label = as.numeric(train$target[1:Sample])
+dim(train_matrix)
+mode(train_matrix) = "numeric"
+mode(test_matrix) = "numeric"
+length(train_label)
+
+load("scotts_rf.RData")
+xgb = xgb.load('scotts_best_xgboost.model')
+library(reprtree)
+
+```
+
+## Training data
+
+We have scotts sales data and related variables from 2013-10-06 to 2017-06-25. I separate the data into Training data of (2013-10-06 -- 2016-06-25) and test data (2016-06-25 -- 2017-06-25). In this example, I predict the "Lawn.Fertilizer.Sales.Units" using weather, marketing activity and DMA information. The dependent variable sum over DMA looks like below:
+
+```{r,echo=FALSE}
+a$data = "training"
+a$data[a$Date>"2016-06-25"] = "test" 
+a %>% ggplot(aes(Date,sales,colour = data)) + geom_line()
+```
+
+## Models
+
+The most popular prediction machine learning are tree-based model including Random Forest and XGboost Tree because of high prediction accuracy. The simple version of tree-model looks like below. 
+
+```{r,echo=FALSE}
+reprtree:::plot.getTree(rf,depth = 4)
+```
+
+The prediction power comes from the ability to capture deep interaction between different variable. The above plot shows that Video impression is important but only when temperature over 14. Even though it looks simple for each node in the tree, we would get significant boost in the prediction if we build a much deeper trees and combine the power of multiple trees. Combination of multiple tree is where is name "random forest" come from. 
+
+The model is non-linear, there is no coefficient related, but we can still calculate the importance of the variables, which is similar to T-stats in MMM. The following plot shows the most important variable for Scotts Lawn sales.
+
+```{r,echo=FALSE}
+names = dimnames(train_matrix)[[2]]
+# compute feature importance matrix
+importance_matrix = xgb.importance(names, model=xgb)[1:20]
+```
+
+The following figure visualize the relation between Sales and Average Temperature. We can see temperature will boost sales in range 20 to 40 while sales wouldn't change with temperature when temperature is over 40. If we force a linear model on this dataset, we would get bad prediction.
+
+```{r,echo=FALSE}
+partialPlot(rf, train,Avg_AppTempF_Avg, "versicolor")
+```
+
+
+
+## Prediction
+
+Overall, The aggregated forecasting looks fine. The forecasting model capture seasonal trend well. However, the forecasting model cannot explain the sharpe drop in May of 2017 because this pattern never happened in training data. 
+
+```{r,echo=FALSE}
+
+xgb_predict = predict(xgb,test_matrix)
+
+#sqrt(mean((xgb_predict-test$Lawn.Fertilizer.Sales.Units)^2))
+
+cbind(test,xgb_predict) %>% group_by(Date = Week.Ending.Sunday) %>% 
+  summarise(predicted = sum(xgb_predict),actual= sum(target)) %>%
+  melt(id="Date") %>% ggplot(aes(Date,value,colour=variable)) + geom_line()
+
+```
+
+
+Breaking down the prediction to Retalier level, the forecasting results is pretty well in ACE where the trend is similar with training data.  
+
+```{r,echo=FALSE}
+cbind(test,scotts_dimension[scotts_dimension$Week.Ending.Sunday>"2016-06-25",c("DMA","Retailer")],xgb_predict) %>% group_by(Date = Week.Ending.Sunday,Retailer) %>% 
+  summarise(predicted = sum(xgb_predict),actual= sum(target)) %>%
+  melt(id=c("Date","Retailer")) %>% ggplot(aes(Date,value,colour=variable)) + geom_line() +
+   facet_grid(. ~ Retailer, scales = "free")
+
+```
+
+
